@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#05070d">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Virtual Neuro AR</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="stage"></canvas>
+
+  <button id="gear" class="gear" hidden aria-label="Settings">⚙</button>
+
+  <section id="menu" class="menu">
+    <div class="card">
+      <h1>Virtual Neuro <span>AR</span></h1>
+      <p class="lead">Point the back camera at your own body or at a visitor. The nerves and the brain appear inside the body part you are looking at.</p>
+      <div class="buttons">
+        <button id="start-camera" class="primary">Start camera</button>
+        <button id="start-demo">Demo (no camera)</button>
+      </div>
+      <p id="status" class="status"></p>
+      <div class="opts">
+        <label><input type="checkbox" id="opt-vr"> VR headset (side-by-side)</label>
+        <label><input type="checkbox" id="opt-labels"> Labels</label>
+        <label><input type="checkbox" id="opt-pulses"> Nerve signal pulses</label>
+        <label><input type="checkbox" id="opt-deep"> Show nerves on the far side (dashed)</label>
+        <label><input type="checkbox" id="opt-xray"> X-ray tint</label>
+        <label><input type="checkbox" id="opt-info"> Info caption</label>
+        <label><input type="checkbox" id="opt-debug"> Debug skeleton</label>
+      </div>
+      <button id="close-menu" class="link">Close</button>
+      <p class="hint">In the headset, tap the screen (or the headset button) to open or close this menu.</p>
+    </div>
+  </section>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
