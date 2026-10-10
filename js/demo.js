@@ -85,7 +85,22 @@ function hand(t) {
   return { poses: [], hands: [{ lm: pts.map(([x, y]) => R(x, y)), label: 'Left' }], faces: [] };
 }
 
+// Test case for false detections: a close-up hand plus the kind of skeleton
+// BlazePose hallucinates around it (a "head" on the fingers, shoulders off-screen).
+function handWithGhostPose(t) {
+  const frame = hand(t);
+  const h = frame.hands[0].lm;
+  const lm = new Array(33).fill(null).map(() => ({ x: 0.5, y: 1.4, v: 0.2 }));
+  const at = (i, p, v = 0.9) => { lm[i] = { x: p.x, y: p.y, v }; };
+  at(0, h[12]); at(2, h[11]); at(5, h[15]); at(3, h[10]); at(6, h[16]);
+  at(7, h[6]); at(8, h[19]); at(9, h[9], 0.8); at(10, h[13], 0.8);
+  at(11, { x: 0.25, y: 1.05 }); at(12, { x: 0.85, y: 1.05 });
+  at(13, { x: 0.2, y: 1.6 }, 0.6); at(14, { x: 0.9, y: 1.6 }, 0.6);
+  return { ...frame, poses: [lm] };
+}
+
 export function demoFrame(t, forced) {
+  if (forced === 'ghost') return handWithGhostPose(t);
   const phase = demoPhase(t, forced);
   return phase === 'hand' ? hand(t) : body(t, phase);
 }

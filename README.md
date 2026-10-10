@@ -16,10 +16,28 @@ it**, with labels:
 | **Back** | Spinal cord, spinal nerves, cauda equina |
 | **Leg** | Sciatic, tibial, common fibular, femoral and saphenous nerves |
 
+**How it works, step by step:**
+
+1. **Detect.** A scanning reticle is shown while the app works out which single body part is in
+   view. It looks for a hand or arm, a head (front, side or back), the chest or back, or a leg. A
+   body part must be recognised for several frames in a row before it is accepted. When several
+   are visible, the one that is largest and nearest the centre of view wins, because that is where
+   the visitor is looking.
+2. **Show.** A "Detected: …" badge appears. Only that body part's nervous system then grows in
+   from the body outward, and its labels and caption follow.
+3. **Impulses.** Bright pulses with tails travel along the nerves. Movement commands run away
+   from the brain and spinal cord. Touch signals in the hand run from the fingertips back toward
+   the brain. The brain shows neurons "firing".
+
+To stop a close-up hand being mistaken for a head, a head is only accepted when the face detector
+confirms a face. A back-of-head view needs both shoulders and an ear in the picture, a head of
+plausible size above the shoulders, and no hand covering it. A body skeleton is thrown away when a
+detected hand is far too big for it, because the body tracker invents a whole person around a
+close-up hand. (*Show all detected body parts at once* in the menu turns off the one-part-at-a-time
+behaviour.)
+
 Nerves on the side of the body facing away from the camera are drawn dashed and faint, as if
-seen through the body. Small "signal pulses" travel along the nerves. A caption describes the
-body part nearest the centre of view, so the visitor gets information about whatever they look
-at.
+seen through the body.
 
 Tracking runs on the phone in the browser using
 [MediaPipe](https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker) (body
@@ -30,7 +48,8 @@ no images leave the device.
 
 * **Demo without a camera:** open `index.html?demo`. It cycles through front, side and back views and a
   hand. Fix one view with `?demo=back`, and zoom in with `&zoom=3&at=0.5,0.18` (x,y of the
-  point to centre, 0–1).
+  point to centre, 0–1). `?demo=ghost` reproduces a close-up hand with a falsely detected
+  skeleton; only the hand should be shown.
 * **Live:** open the page on a phone, tick **VR headset** if you are using a viewer, and
   press **Start camera**.
 
@@ -105,7 +124,8 @@ index.html            page and settings menu
 css/style.css
 js/main.js            camera, frame loop, VR side-by-side output, caption
 js/tracker.js         MediaPipe pose, hand and face detection, with smoothing
-js/scene.js           maps landmarks to nerve paths, brain overlays and labels
+js/scene.js           maps landmarks to nerve paths, brain overlays and labels; rejects false detections
+js/focus.js           picks the one body part in view, with stability across frames
 js/anatomy.js         nerve routes in limb coordinates, labels, captions (edit to add structures)
 js/brain.js           procedurally drawn brain (front, side, back)
 js/renderer.js        glow, branches, pulses, label layout

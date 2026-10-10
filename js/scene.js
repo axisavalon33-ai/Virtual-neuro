@@ -29,6 +29,12 @@ const WIDTH = { upperArm: 0.17, forearm: 0.15, thigh: 0.19, leg: 0.14, foot: 0.2
 
 const ok = (p, th = VIS) => !!p && (p.v === undefined || p.v > th);
 
+// The visible view rectangle (set per frame). Region detection only trusts
+// landmarks that are actually inside the picture; BlazePose also guesses
+// positions for body parts outside the frame.
+let VIEW = null;
+const seen = (p, th = VIS) => ok(p, th) && (!VIEW || (p.x >= 0 && p.x <= VIEW.w && p.y >= 0 && p.y <= VIEW.h));
+
 function segFrame(a, b, widthRatio, sidePt) {
   const d = G.sub(b, a);
   const L = G.len(d) || 1;
@@ -53,30 +59,106 @@ export function createScene() {
   return {
     nerves: [], sprites: [], tints: [], labels: [], regions: [],
     anchors: { heads: [], segments: [] },
+    group: null, // body part currently being built; every item is tagged with it
   };
 }
 
-// input: { poses: [lm33[]], hands: [{ lm: lm21[], label: 'Left'|'Right' }], faces: [{ box, kps }] }
+// Body-part groups: 'head', 'arm' (includes the hand), 'torso', 'leg'.
+export const groupOf = (key) => (key === 'hand' ? 'arm' : key.split('-')[0]);
+
+// Keep only the items that belong to one body part.
+export function focusScene(scene, group) {
+  const f = (list) => list.filter((x) => x.g === group);
+  return {
+    ...scene,
+    nerves: f(scene.nerves), sprites: f(scene.sprites), tints: f(scene.tints), labels: f(scene.labels),
+    anchors: { heads: f(scene.anchors.heads), segments: f(scene.anchors.segments) },
+  };
+}
+
+// input: { poses: [lm33[]], hands: [{ lm: lm21[], label }], faces: [{ center, size }], faceDetector: bool }
 // All coordinates already in view pixels; pose landmarks carry visibility as .v
+// opts.view = { w, h } is the visible picture.
 export function buildScene(input, opts = {}) {
+  VIEW = opts.view || null;
   const out = createScene();
   const usedHands = new Set();
-  for (const pose of input.poses) buildPerson(pose, input, out, usedHands, opts);
+  for (const pose of input.poses) {
+    const check = checkPose(pose, input);
+    if (check) buildPerson(pose, input, out, usedHands, opts, check);
+  }
   input.hands.forEach((h, i) => { if (!usedHands.has(i)) buildLoneHand(h, out, opts); });
   return out;
 }
 
+const handSize = (h) => G.dist(h.lm[0], h.lm[9]);
+
+function handBox(h, pad) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of h.lm) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+  return { x0: x0 - pad, y0: y0 - pad, x1: x1 + pad, y1: y1 + pad };
+}
+
+// Sanity checks that stop a close-up hand or arm being read as a whole person
+// (BlazePose readily "imagines" a full skeleton, head included, around a hand).
+function checkPose(lm, input) {
+  const segLen = (a, b) => (ok(lm[a]) && ok(lm[b]) ? G.dist(lm[a], lm[b]) : 0);
+  const bodyScale = Math.max(
+    segLen(P.lSh, P.rSh), segLen(P.lSh, P.lEl), segLen(P.rSh, P.rEl),
+    segLen(P.lEl, P.lWr) * 1.2, segLen(P.rEl, P.rWr) * 1.2, segLen(P.lHip, P.lKnee) * 0.9, segLen(P.rHip, P.rKnee) * 0.9,
+  );
+  // A real hand (wrist to knuckles about 10 cm) is a quarter of the shoulder
+  // width. A much bigger hand means the skeleton was hallucinated around it.
+  for (const h of input.hands) {
+    if (bodyScale > 0 && handSize(h) > 0.55 * bodyScale) return null;
+  }
+  // Nothing of the body actually inside the picture: ignore.
+  if (!lm.some((p) => seen(p, 0.6))) return null;
+  return {};
+}
+
+// Is there a real head here? Front and side views must be confirmed by the
+// face detector. A back-of-head view needs both shoulders and an ear in the
+// picture, a plausible head size, and no hand covering it.
+function headConfidence(lm, input, headR, facing) {
+  const nose = lm[P.nose];
+  const earMid = ok(lm[P.lEar], 0.3) && ok(lm[P.rEar], 0.3) ? G.mid(lm[P.lEar], lm[P.rEar]) : (ok(lm[P.lEar], 0.3) ? lm[P.lEar] : lm[P.rEar]);
+  const ref = ok(nose, 0.4) ? nose : earMid;
+  if (!ref) return 0;
+  const faceNear = input.faces.some((f) => G.dist(f.center, ref) < Math.max(headR * 1.3, f.size * 0.8));
+  if (faceNear) return 1;
+  const handOver = input.hands.some((h) => {
+    const b = handBox(h, headR * 0.3);
+    return ref.x > b.x0 && ref.x < b.x1 && ref.y > b.y0 && ref.y < b.y1;
+  });
+  if (handOver) return 0;
+  const shoulders = seen(lm[P.lSh]) && seen(lm[P.rSh]);
+  const ear = seen(lm[P.lEar], 0.5) || seen(lm[P.rEar], 0.5);
+  if (!shoulders || !ear) return 0;
+  const shMid = G.mid(lm[P.lSh], lm[P.rSh]);
+  const shW = G.dist(lm[P.lSh], lm[P.rSh]);
+  const above = earMid && earMid.y < shMid.y - shW * 0.2; // head sits above the shoulders
+  const sizeOk = headR > shW * 0.15 && headR < shW * 0.6;
+  if (!above || !sizeOk) return 0;
+  if (facing === 'back') return 0.75;
+  // Side profile: the short-range face detector often misses full profiles.
+  if (!input.faceDetector || (seen(nose, 0.6) && !(seen(lm[P.lEar], 0.5) && seen(lm[P.rEar], 0.5)))) return 0.6;
+  return 0;
+}
+
 // ---------------------------------------------------------------------------
 
-// Remember where each body region is on screen; the caption describes the one
-// nearest the centre of view (where the visitor is looking).
-function addRegion(out, key, at) {
-  out.regions.push({ key, x: at.x, y: at.y });
+// A detected body part: where it is, how big it looks (pixels) and how sure
+// we are (0..1). focus.js picks the one the visitor is looking at.
+function addRegion(out, key, at, size, conf = 1) {
+  out.regions.push({ key, group: groupOf(key), x: at.x, y: at.y, size, conf });
 }
 
 function addNerve(out, pts, style) {
   if (pts.length < 2) return;
   out.nerves.push({
+    g: out.group,
+    reverse: !!style.reverse,
     pts: G.smoothPath(pts, 6),
     color: style.color || COLORS.nerve,
     width: style.width,
@@ -90,7 +172,7 @@ function addNerve(out, pts, style) {
 
 function addLabel(out, at, text, opts, extra = {}) {
   if (!opts.labels) return;
-  out.labels.push({ x: at.x, y: at.y, text, dir: extra.dir || null, color: extra.color || COLORS.nerve, pri: extra.pri ?? 1 });
+  out.labels.push({ g: out.group, x: at.x, y: at.y, text, dir: extra.dir || null, color: extra.color || COLORS.nerve, pri: extra.pri ?? 1 });
 }
 
 function faceStyle(face, facing, opts, base) {
@@ -121,6 +203,7 @@ function headRadius(lm) {
 }
 
 function buildPerson(lm, input, out, usedHands, opts) {
+  out.group = null;
   const headR = headRadius(lm);
   const facing = estimateFacing(lm, input.faces, headR);
   const shOk = ok(lm[P.lSh]) && ok(lm[P.rSh]);
@@ -137,10 +220,15 @@ function buildPerson(lm, input, out, usedHands, opts) {
   const scale = Math.max(shW, headR * 3.2, 60);
   const nerveW = G.clamp(scale * 0.022, 1.6, 9);
 
-  if (shOk) buildTorso(lm, out, opts, { facing, shMid, hipMid, shW, nerveW });
+  out.group = 'torso';
+  if (shOk && seen(lm[P.lSh]) && seen(lm[P.rSh])) buildTorso(lm, out, opts, { facing, shMid, hipMid, shW, nerveW });
+  out.group = 'arm';
   for (const arm of ARMS) buildArm(lm, arm, input.hands, usedHands, out, opts, { facing, center, nerveW });
+  out.group = 'leg';
   for (const leg of LEGS) buildLeg(lm, leg, out, opts, { facing, center, hipMid, nerveW });
-  if (headR > 0) buildHead(lm, out, opts, { facing, headR, shMid, shW });
+  out.group = 'head';
+  const headConf = headR > 0 ? headConfidence(lm, input, headR, facing) : 0;
+  if (headConf > 0) buildHead(lm, out, opts, { facing, headR, shMid, shW, conf: headConf });
 }
 
 // --- Arms & hands ----------------------------------------------------------
@@ -164,6 +252,8 @@ function handPalmFacing(lm, isRightHand) {
 function buildArm(lm, arm, hands, usedHands, out, opts, ctx) {
   const sh = lm[arm.sh], el = lm[arm.el], wr = lm[arm.wr];
   if (!ok(sh) || !ok(el)) return;
+  // Some of the arm itself must be in the picture.
+  if (!seen(el) && !(seen(wr) && seen(sh))) return;
   const frames = {};
   const medial = ctx.center || lm[arm.sh === P.lSh ? P.rSh : P.lSh];
   frames.upperArm = segFrame(sh, el, WIDTH.upperArm, medial);
@@ -183,10 +273,11 @@ function buildArm(lm, arm, hands, usedHands, out, opts, ctx) {
     }
     frames.forearm = segFrame(el, wr, WIDTH.forearm, ulnarPt);
   }
-  addRegion(out, 'arm', frames.forearm ? el : G.mid(sh, el));
-  if (handLm) addRegion(out, 'hand', handLm[9]);
-  out.anchors.segments.push({ name: 'upperArm', a: sh, b: el, w: frames.upperArm.w });
-  if (frames.forearm) out.anchors.segments.push({ name: 'forearm', a: el, b: wr, w: frames.forearm.w });
+  const armLen = G.dist(sh, el) + (frames.forearm ? G.dist(el, wr) : 0);
+  if (handLm) addRegion(out, 'hand', G.lerp(el, handLm[9], 0.6), armLen, 1);
+  else addRegion(out, 'arm', frames.forearm ? el : G.mid(sh, el), armLen, 0.8);
+  out.anchors.segments.push({ g: out.group, name: 'upperArm', a: sh, b: el, w: frames.upperArm.w });
+  if (frames.forearm) out.anchors.segments.push({ g: out.group, name: 'forearm', a: el, b: wr, w: frames.forearm.w });
   limbTints(out, frames, opts);
   drawLimbNerves(ARM_NERVES, frames, handLm, out, opts, { facing: ctx.facing, handFacing, nerveW: ctx.nerveW });
   if (!handLm && frames.forearm) poseHandTwigs(lm, arm, out, ctx);
@@ -212,9 +303,9 @@ function buildLoneHand(hand, out, opts) {
   // when someone looks at their own hand.
   const elbow = G.add(lm[0], G.mul(G.norm(G.sub(lm[0], lm[9])), size * 2.6));
   const frames = { forearm: segFrame(elbow, lm[0], WIDTH.forearm, G.add(lm[0], G.sub(lm[17], lm[5]))) };
-  addRegion(out, 'hand', lm[9]);
-  addRegion(out, 'arm', G.lerp(elbow, lm[0], 0.4));
-  out.anchors.segments.push({ name: 'forearm', a: elbow, b: lm[0], w: frames.forearm.w });
+  out.group = 'arm';
+  addRegion(out, 'hand', G.lerp(lm[0], lm[9], 0.5), size * 4, 1);
+  out.anchors.segments.push({ g: out.group, name: 'forearm', a: elbow, b: lm[0], w: frames.forearm.w });
   limbTints(out, frames, opts);
   const nerveW = G.clamp(size * 0.07, 1.6, 9);
   drawLimbNerves(ARM_NERVES, frames, lm, out, opts, { facing: handFacing, handFacing, nerveW });
@@ -222,7 +313,7 @@ function buildLoneHand(hand, out, opts) {
 
 function limbTints(out, frames, opts) {
   if (!opts.xray) return;
-  for (const f of Object.values(frames)) out.tints.push({ type: 'capsule', a: f.a, b: f.b, r: f.w * 1.15 });
+  for (const f of Object.values(frames)) out.tints.push({ g: out.group, type: 'capsule', a: f.a, b: f.b, r: f.w * 1.15 });
 }
 
 function drawLimbNerves(specs, frames, handLm, out, opts, ctx) {
@@ -242,7 +333,8 @@ function drawLimbNerves(specs, frames, handLm, out, opts, ctx) {
             cur.push(pts[0]);
             flush();
           }
-          if (hStyle) addNerve(out, pts, { ...hStyle, id: spec.id + i, twigs: false });
+          // Touch signals travel from the fingertips back toward the brain.
+          if (hStyle) addNerve(out, pts, { ...hStyle, id: spec.id + i, twigs: false, reverse: true });
         });
         if (hb.label && hStyle?.visible) {
           addLabel(out, handRef(handLm, hb.label.at), hb.label.name, opts, { pri: 1 });
@@ -270,6 +362,7 @@ function drawLimbNerves(specs, frames, handLm, out, opts, ctx) {
 function buildLeg(lm, leg, out, opts, ctx) {
   const hip = lm[leg.hip], knee = lm[leg.knee], ank = lm[leg.ank], foot = lm[leg.foot];
   if (!ok(hip) || !ok(knee)) return;
+  if (!seen(knee) || !(seen(hip) || seen(ank))) return;
   const otherHip = lm[leg.hip === P.lHip ? P.rHip : P.lHip];
   const medial = ctx.hipMid || otherHip || ctx.center;
   const frames = { thigh: segFrame(hip, knee, WIDTH.thigh, medial) };
@@ -278,9 +371,9 @@ function buildLeg(lm, leg, out, opts, ctx) {
     frames.leg = segFrame(knee, ank, WIDTH.leg, legMedial);
     if (ok(foot, 0.4)) frames.foot = segFrame(ank, foot, WIDTH.foot, G.add(ank, G.sub(medial, hip)));
   }
-  addRegion(out, 'leg', knee);
-  out.anchors.segments.push({ name: 'thigh', a: hip, b: knee, w: frames.thigh.w });
-  if (frames.leg) out.anchors.segments.push({ name: 'leg', a: knee, b: ank, w: frames.leg.w });
+  addRegion(out, 'leg', knee, G.dist(hip, knee) + (frames.leg ? G.dist(knee, ank) : 0), 0.9);
+  out.anchors.segments.push({ g: out.group, name: 'thigh', a: hip, b: knee, w: frames.thigh.w });
+  if (frames.leg) out.anchors.segments.push({ g: out.group, name: 'leg', a: knee, b: ank, w: frames.leg.w });
   limbTints(out, frames, opts);
   drawLimbNerves(LEG_NERVES, frames, null, out, opts, { facing: ctx.facing, nerveW: ctx.nerveW * 1.1 });
 }
@@ -297,11 +390,11 @@ function buildTorso(lm, out, opts, ctx) {
   const f = segFrame(shMid, hipMid, 0, G.add(shMid, G.sub(lm[P.lSh], lm[P.rSh])));
   f.w = shW / 2;
   const T = (t, s) => segPt(f, t, s);
-  addRegion(out, facing === 'back' ? 'torso-back' : 'torso-front', T(0.4, 0));
-  out.anchors.segments.push({ name: 'torso', a: shMid, b: hipMid, w: f.w });
+  addRegion(out, facing === 'back' ? 'torso-back' : 'torso-front', T(0.4, 0), G.dist(shMid, hipMid), ctx.hipMid ? 0.9 : 0.6);
+  out.anchors.segments.push({ g: out.group, name: 'torso', a: shMid, b: hipMid, w: f.w });
 
   if (opts.xray) {
-    out.tints.push({ type: 'poly', pts: [T(-0.05, 1.05), T(-0.05, -1.05), T(1.02, -0.75), T(1.02, 0.75)] });
+    out.tints.push({ g: out.group, type: 'poly', pts: [T(-0.05, 1.05), T(-0.05, -1.05), T(1.02, -0.75), T(1.02, 0.75)] });
   }
   const w = ctx.nerveW;
 
@@ -391,13 +484,13 @@ function buildHead(lm, out, opts, ctx) {
     return G.add(C, G.add(G.mul(X, uu * R), G.mul(D, v * R)));
   };
 
-  addRegion(out, 'head-' + view, C);
-  out.anchors.heads.push({ c: C, R, rot, view, dir });
+  addRegion(out, 'head-' + view, C, R * 2.2, ctx.conf);
+  out.anchors.heads.push({ g: out.group, c: C, R, rot, view, dir });
   if (opts.xray) {
-    out.tints.push({ type: 'ellipse', c: H(0, -0.05), rx: R * (view === 'side' ? 1.05 : 0.88), ry: R * 1.12, rot });
+    out.tints.push({ g: out.group, type: 'ellipse', c: H(0, -0.05), rx: R * (view === 'side' ? 1.05 : 0.88), ry: R * 1.12, rot });
   }
   const k = { front: 0.85, side: 0.95, back: 0.85 }[view];
-  out.sprites.push({ view, c: C, R: R * k, rot, flip: view === 'side' && dir < 0 ? -1 : 1 });
+  out.sprites.push({ g: out.group, view, c: C, R: R * k, rot, flip: view === 'side' && dir < 0 ? -1 : 1 });
   for (const l of BRAIN_LABELS[view]) {
     const at = H(l.u * k, l.v * k);
     addLabel(out, at, l.name, opts, { pri: 3, color: '#ff9fb4', dir: G.norm(G.sub(at, C)) });
